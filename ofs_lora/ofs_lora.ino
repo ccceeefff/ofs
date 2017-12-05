@@ -9,11 +9,13 @@
 #include "src/lmic/src/hal/hal.h"
 #include "src/tinygpsplus/TinyGPS++.h"
 
+#define USE_RANDOM_DATA 1
+
 //IR sensor analog pins
 #define irSensorPin0   A0  
 #define irSensorPin1   A2 
-int irSensor0=0;
-int irSensor1=0;
+uint8_t irSensor0=0;
+uint8_t irSensor1=0;
 
 //GPS communiction setup
 static const int RXPin = 8,TXPin = 9;
@@ -46,16 +48,19 @@ void os_getDevEui (u1_t* buf) { memcpy_P(buf, DEVEUI, 8);}
 static const u1_t PROGMEM APPKEY[16] = { 0xBE, 0xEF, 0xBE, 0xEF, 0xBE, 0xEF, 0xBE, 0xEF, 0xBE, 0xEF, 0xBE, 0xEF, 0xBE, 0xEF, 0xBE, 0xEF };
 void os_getDevKey (u1_t* buf) {  memcpy_P(buf, APPKEY, 16);}
 
-static uint8_t mydata[] = "Hello, world!";
-static osjob_t sendjob;
 static osjob_t samplejob;
 
-static uint8_t dataBuffer[2][10];
+#define LORA_DATA_PORT 1
+#define NUM_BUFFERS 2
+#define SAMPLES_PER_BUFFER 10
+
+static uint8_t dataBuffer[NUM_BUFFERS][SAMPLES_PER_BUFFER];
+static uint8_t currentBuffer = 0;
+static uint8_t currentIndex = 0;
 
 // Schedule TX every this many seconds (might become longer due to duty
 // cycle limitations).
-const unsigned TX_INTERVAL = 10;
-const unsigned SAMPLE_INTERVAL = 60;
+const unsigned SAMPLE_INTERVAL = 1;
 
 // Pin mapping
 const lmic_pinmap lmic_pins = {
@@ -90,6 +95,10 @@ void onEvent (ev_t ev) {
             // Disable link check validation (automatically enabled
             // during join, but not supported by TTN at this time).
             LMIC_setLinkCheckMode(0);
+
+            
+            // Start job (sending automatically starts OTAA too)
+            do_sample(&samplejob);
             break;
         case EV_RFU1:
             Serial.println(F("EV_RFU1"));
@@ -110,8 +119,6 @@ void onEvent (ev_t ev) {
               Serial.println(LMIC.dataLen);
               Serial.println(F(" bytes of payload"));
             }
-            // Schedule next transmission
-            os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
             break;
         case EV_LOST_TSYNC:
             Serial.println(F("EV_LOST_TSYNC"));
@@ -135,27 +142,47 @@ void onEvent (ev_t ev) {
     }
 }
 
-void do_send(osjob_t* j){
+void do_send(uint8_t bufferIndex){
     // Check if there is not a current TX/RX job running
     if (LMIC.opmode & OP_TXRXPEND) {
         Serial.println(F("OP_TXRXPEND, not sending"));
     } else {
         // Prepare upstream data transmission at the next possible time.
-        LMIC_setTxData2(1, mydata, sizeof(mydata)-1, 0);
+        LMIC_setTxData2(LORA_DATA_PORT, dataBuffer[bufferIndex], SAMPLES_PER_BUFFER, 0);
         Serial.println(F("Packet queued"));
     }
-    // Next TX is scheduled after TX_COMPLETE event.
 }
 
 void do_sample(osjob_t *j){
   // sample every second
   // send up 5 (x2) samples every 5 seconds
-//  irSensor0 = analogRead(irSensorPin0);
-//  irSensor1 = analogRead(irSensorPin1);
-//  irSensor0 = pgm_read_word(&Sensor0[irSensor0]);
-//  irSensor1 = pgm_read_word(&Sensor1[irSensor1]); 
-//
-//  os_setTimedCallback(&samplejob, os_getTime()+sec2osticks(SAMPLE_INTERVAL), do_sample);
+  Serial.println(F("Take sample"));
+
+#if USE_RANDOM_DATA
+  irSensor0 = random(255);
+  irSensor1 = random(255);
+#else
+  irSensor0 = analogRead(irSensorPin0);
+  irSensor1 = analogRead(irSensorPin1);
+#endif
+  
+  irSensor0 = pgm_read_word(&Sensor0[irSensor0]);
+  irSensor1 = pgm_read_word(&Sensor1[irSensor1]); 
+
+  // place data in buffer
+  dataBuffer[currentBuffer][currentIndex++] = irSensor0;
+  dataBuffer[currentBuffer][currentIndex++] = irSensor1;
+
+  if(currentIndex >= SAMPLES_PER_BUFFER){
+    // send out buffer and move to next index
+    do_send(currentBuffer);
+    currentIndex = 0;
+    currentBuffer = (currentBuffer+1) % NUM_BUFFERS;
+  }
+  
+  os_setTimedCallback(&samplejob, os_getTime()+sec2osticks(SAMPLE_INTERVAL), do_sample);
+
+  // write to SD Card
 }
 
 void setup() {
@@ -170,9 +197,6 @@ void setup() {
 //      return;
 //    }
 //    Serial.println("card initialized.");
-//
-//    dataBuffer[0][0] = 'A';
-//    dataBuffer[1][0] = 'B';
 
     // LMIC init
     os_init();
@@ -180,10 +204,9 @@ void setup() {
     LMIC_reset();
 //    LMIC_enableSubBand(1);
     LMIC_selectSubBand(0);
+    LMIC_startJoining();
 
-    // Start job (sending automatically starts OTAA too)
-    do_send(&sendjob);
-//    os_setTimedCallback(&samplejob, os_getTime()+sec2osticks(SAMPLE_INTERVAL), do_sample);
+    // will start sampling after joining the network
 }
 
 void loop() {
